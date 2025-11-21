@@ -36,16 +36,26 @@
     <main class="container py-5">
         <div class="row justify-content-center">
             <div class="col-md-8 text-center">
-                <h1 class="mb-3">Certificate Issuance & Verification</h1>
-                <p class="lead mb-4">Issue PDF certificates, store them on IPFS, and register their hash on-chain for public verification.</p>
+                <h1 class="mb-3">On-Chain Certificate Issuance</h1>
+                <p class="lead mb-4">
+                    Generate branded PDF certificates, pin them to IPFS, and record a
+                    tamper-evident hash on the blockchain for anyone to verify.
+                </p>
 
                 <div class="d-flex justify-content-center gap-2 mb-3">
                     <a class="btn btn-lg btn-success me-2" href="{{ route('verify.form') }}">Verify a Certificate</a>
-                    <!-- <a class="btn btn-lg btn-outline-secondary" href="/docs/certificate-system.md">Documentation</a> -->
+                    @auth
+                        <a class="btn btn-lg btn-primary" href="{{ route('issuer.dashboard') }}">Go to Dashboard</a>
+                    @else
+                        <a class="btn btn-lg btn-primary" href="{{ route('login') }}">Issuer Login</a>
+                    @endauth
                 </div>
 
-                <!-- <hr /> -->
-                <!-- <p>If you're an issuer, log in and upload certificates from your dashboard. Students can register to view issued certificates.</p> -->
+                <p class="text-muted">
+                    Issuers can create certificates in a few clicks. Students and
+                    employers can independently verify authenticity using the original
+                    PDF or its SHA-256 hash.
+                </p>
             </div>
         </div>
     </main>

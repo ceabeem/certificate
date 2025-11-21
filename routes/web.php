@@ -31,6 +31,9 @@ Route::middleware(['auth'])->group(function () {
     Route::get('/student/certificates/{id}/download', [StudentController::class, 'download'])->name('student.certificates.download');
 });
 
+// Public download route so verifiers can fetch the original PDF
+Route::get('/certificates/{id}/download', [StudentController::class, 'publicDownload'])->name('certificates.public.download');
+
 // Verification routes (public)
 Route::get('/verify', [VerificationController::class, 'showForm'])->name('verify.form');
 Route::post('/verify/upload', [VerificationController::class, 'verifyByUpload'])->name('verify.upload');

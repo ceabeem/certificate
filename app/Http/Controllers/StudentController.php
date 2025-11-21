@@ -53,4 +53,17 @@ class StudentController extends Controller
 
         return Storage::download($cert->pdf_path, basename($cert->pdf_path));
     }
+
+    // Public download endpoint used from verification pages.
+    // Anyone with the link can download the original PDF.
+    public function publicDownload($id)
+    {
+        $cert = Certificate::findOrFail($id);
+
+        if (! $cert->pdf_path || ! Storage::exists($cert->pdf_path)) {
+            abort(404);
+        }
+
+        return Storage::download($cert->pdf_path, basename($cert->pdf_path));
+    }
 }
