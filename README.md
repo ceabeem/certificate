@@ -1,127 +1,162 @@
-# Certificate Issuance & Verification (local setup)
+# Certificate Issuance & Verification Platform
 
-This repository contains a Laravel app and helper scripts to issue certificates (PDFs), store them on IPFS, and register certificate metadata on a blockchain contract.
+This repository contains a Laravel application and helper scripts for issuing digital certificates as PDFs, anchoring them on IPFS and a smart contract (Polygon Amoy), and providing a public verification flow (by PDF, hash, link, or QR).
 
-Quick setup (developer machine)
+---
 
-1. Copy environment file and configure DB + Pinata + RPC
+## Features
+
+- **Issuer dashboard**: authenticated issuers can create and manage certificates.
+- **In‑app PDF generation**: certificates are rendered from a Blade template (no manual PDF upload).
+- **IPFS storage**: generated PDFs are pinned to IPFS via Pinata, and the returned CID is stored.
+- **Blockchain‑ready payloads**: each certificate produces a payload JSON that can be submitted on‑chain.
+- **Public verification**:
+  - Verify by **PDF upload** (recompute SHA‑256 and match stored hash).
+  - Verify by **SHA‑256 hash** (direct hash lookup).
+  - Direct **verification link** (`/verify/{sha}`) and **QR code**.
+- **Human‑readable certificate codes**: e.g. `CERT-20251121-ABCDE` for display.
+- **Public PDF download**: verifiers can download the exact original PDF that was hashed.
+
+---
+
+## How it works (high level)
+
+1. **Issuance (issuer flow)**
+	- Issuer fills a form with student name, course, completed date, grade, etc.
+	- The app generates a styled certificate PDF from `resources/views/certificates/pdf.blade.php`.
+	- The PDF is saved to `storage/app/certificates/`.
+	- A SHA‑256 hash of the PDF is computed and stored as `sha256_hash`.
+	- The PDF is uploaded to IPFS (Pinata); the returned `ipfs_cid` is stored.
+	- A `Certificate` record is created with all metadata (student, course, grade, dates, certificate code, hash, CID, issuer, etc.).
+	- A **blockchain payload file** is generated under `storage/app/private/blockchain_payloads/` for an off‑chain operator to submit to the smart contract.
+
+2. **Blockchain anchoring (operator flow)**
+	- A separate Node.js script (`scripts/submitCertificate.cjs`) reads a payload JSON file and sends a transaction to the certificate smart contract on Polygon Amoy.
+	- On success, the script can call back into the Laravel backend (using `BACKEND_CALLBACK_URL`) so the corresponding `Certificate` row is updated with the transaction hash (`blockchain_tx`).
+	- Once `blockchain_tx` is set, the verification UI shows on‑chain status and a link to Polygonscan.
+
+3. **Public verification**
+	- Visitors go to `/verify` and either:
+	  - Upload a certificate PDF (the app recomputes SHA‑256 and looks up a matching `sha256_hash`), or
+	  - Paste a known SHA‑256 hash.
+	- The app:
+	  - Looks up the `Certificate` by hash in the database.
+	  - Optionally checks chain status using `blockchain_tx` and the operator callback.
+	  - Renders a rich result page with:
+		 - Verdict (valid/invalid/pending),
+		 - Student + course + grade + dates + certificate code,
+		 - IPFS CID link,
+		 - Blockchain status and explorer link (Polygon Amoy),
+		 - Button to download the original PDF,
+		 - Shareable verification link (`/verify/{sha}`) and QR code.
+
+4. **Verification without the app (pure blockchain)**
+	- Because the certificate hash is written to the smart contract, anyone can independently verify it using:
+	  - The contract address (`CERTIFICATE_CONTRACT_ADDRESS`),
+	  - The network (Polygon Amoy),
+	  - The SHA‑256 hash (as `0x`‑prefixed hex), and
+	  - The contract ABI (to call a read function like `getCertificate(hash)`).
+	- This can be done via Polygonscan’s “Read Contract” tab or a simple ethers.js script.
+
+---
+
+## Local setup (developer machine)
+
+1. **Environment & configuration**
+
+	```powershell
+	# from project root on Windows (PowerShell)
+	cp .env.example .env
+	# edit .env with your DB credentials, Pinata keys, and blockchain settings
+	```
+
+	In `.env`, you’ll typically set:
+
+	- `DB_*` for MySQL
+	- `PINATA_API_KEY`, `PINATA_API_SECRET`, `PINATA_JWT`
+	- `BLOCKCHAIN_RPC_URL` (e.g. Polygon Amoy via Alchemy)
+	- `CERTIFICATE_CONTRACT_ADDRESS` (deployed contract)
+	- `BACKEND_CALLBACK_URL` (for the operator to report tx hashes back)
+
+2. **Install PHP dependencies (composer)**
+
+	```powershell
+	composer install
+	```
+
+3. **Install Node dependencies (frontend + scripts)**
+
+	```powershell
+	npm install
+	```
+
+4. **Compile assets and run migrations**
+
+	```powershell
+	npm run build
+	php artisan migrate
+	php artisan serve
+	```
+
+	The app should now be accessible at the URL configured in `.env` (e.g. `http://certificate.test/`).
+
+---
+
+## Smart contract deployment (Hardhat)
+
+A Hardhat project (in `hardhat/` or `scripts/`) is used to deploy the certificate contract.
+
+Example workflow:
 
 ```powershell
-# from project root on Windows (PowerShell)
-cp .env.example .env
-# edit .env with your DB and Pinata credentials
-```
-
-2. Install PHP dependencies (composer)
-
-```powershell
-composer install
-```
-
-3. Install Node dependencies for frontend + Hardhat
-
-```powershell
-npm install
-```
-
-4. Compile assets (optional) and run migrations
-
-```powershell
-npm run build
-php artisan migrate
-php artisan serve
-```
-
-Deploying the smart contract (Hardhat)
-
-Hardhat is installed as a dev dependency. Build and deploy with:
-
-```powershell
-# Set RPC and DEPLOYER_PRIVATE_KEY in environment (PowerShell example)
-$env:RPC_URL = 'https://your-rpc'
+# Set RPC and deployer private key (PowerShell example)
+$env:RPC_URL = 'https://polygon-amoy.g.alchemy.com/v2/your-key'
 $env:DEPLOYER_PRIVATE_KEY = '0x...'
-# compile
+
 npx hardhat compile
-# deploy to the default network (pass --network if needed)
-npx hardhat run hardhat/scripts/deploy.js --network localhost
+npx hardhat run hardhat\scripts\deploy.cjs --network amoy
 ```
 
-The deploy script writes a JSON file into `hardhat/deployments/` containing the contract address. Copy that address to your `.env` as `CERTIFICATE_CONTRACT_ADDRESS`.
+After deployment, copy the contract address into `.env` as `CERTIFICATE_CONTRACT_ADDRESS`.
 
-Operator: submitting payloads to chain
+---
 
-The Laravel app will create payload files in `storage/app/blockchain_payloads/` when an issuer uploads a certificate. To submit them to-chain from a secure operator machine:
+## Operator: sending certificate payloads on‑chain
+
+When a certificate is issued, Laravel writes a payload JSON under `storage/app/private/blockchain_payloads/`.
+
+On a secure machine (not the web server), run:
 
 ```powershell
-# create an operator env file using .env.operator.example
+# Configure operator environment (PowerShell)
 cp .env.operator.example .env.operator
-# edit the file and set RPC_URL, CONTRACT_ADDRESS, PRIVATE_KEY and BACKEND_CALLBACK_URL
-npm i ethers dotenv axios
-node .\scripts\submitCertificate.js C:\path\to\payload.json
+# edit .env.operator with RPC_URL, CONTRACT_ADDRESS, PRIVATE_KEY, BACKEND_CALLBACK_URL
+
+npm install ethers dotenv axios
+node scripts\submitCertificate.cjs C:\path\to\payload.json
 ```
 
-Verification
+This script:
 
-Visit `/verify` in the running Laravel app. Upload a PDF or paste a hash. If the certificate is found in the DB and a blockchain tx exists and is confirmed, you'll see a verified result.
+- Reads the payload file.
+- Sends a transaction to the certificate contract (`CERTIFICATE_CONTRACT_ADDRESS`) on `BLOCKCHAIN_RPC_URL`.
+- Calls back to `BACKEND_CALLBACK_URL` so the Laravel app can mark the certificate as on‑chain and store `blockchain_tx`.
 
-Notes
-- Private keys should never be stored on the web server. Use the operator workflow or a secure signing system for automation.
-- See `docs/certificate-system.md` for more detailed design notes.<p align="center"><a href="https://laravel.com" target="_blank"><img src="https://raw.githubusercontent.com/laravel/art/master/logo-lockup/5%20SVG/2%20CMYK/1%20Full%20Color/laravel-logolockup-cmyk-red.svg" width="400" alt="Laravel Logo"></a></p>
+**Security note:** keep private keys only in operator environments; do not store them in `.env` on the web server.
 
-<p align="center">
-<a href="https://github.com/laravel/framework/actions"><img src="https://github.com/laravel/framework/workflows/tests/badge.svg" alt="Build Status"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/dt/laravel/framework" alt="Total Downloads"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/v/laravel/framework" alt="Latest Stable Version"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/l/laravel/framework" alt="License"></a>
-</p>
+---
 
-## About Laravel
+## Verification flows
 
-Laravel is a web application framework with expressive, elegant syntax. We believe development must be an enjoyable and creative experience to be truly fulfilling. Laravel takes the pain out of development by easing common tasks used in many web projects, such as:
+- **By PDF upload**: user uploads a certificate PDF on `/verify` → app computes SHA‑256 → checks DB and chain → shows result.
+- **By hash**: user pastes a hex SHA‑256 hash on `/verify` or visits `/verify/{sha}` directly.
+- **By QR**: scanning the QR (from the verification page or printed PDF) opens `/verify/{sha}` in a browser.
+- **By blockchain only**: advanced users can read the contract state on Polygon Amoy directly using the hash.
 
-- [Simple, fast routing engine](https://laravel.com/docs/routing).
-- [Powerful dependency injection container](https://laravel.com/docs/container).
-- Multiple back-ends for [session](https://laravel.com/docs/session) and [cache](https://laravel.com/docs/cache) storage.
-- Expressive, intuitive [database ORM](https://laravel.com/docs/eloquent).
-- Database agnostic [schema migrations](https://laravel.com/docs/migrations).
-- [Robust background job processing](https://laravel.com/docs/queues).
-- [Real-time event broadcasting](https://laravel.com/docs/broadcasting).
+---
 
-Laravel is accessible, powerful, and provides tools required for large, robust applications.
+## Notes
 
-## Learning Laravel
-
-Laravel has the most extensive and thorough [documentation](https://laravel.com/docs) and video tutorial library of all modern web application frameworks, making it a breeze to get started with the framework. You can also check out [Laravel Learn](https://laravel.com/learn), where you will be guided through building a modern Laravel application.
-
-If you don't feel like reading, [Laracasts](https://laracasts.com) can help. Laracasts contains thousands of video tutorials on a range of topics including Laravel, modern PHP, unit testing, and JavaScript. Boost your skills by digging into our comprehensive video library.
-
-## Laravel Sponsors
-
-We would like to extend our thanks to the following sponsors for funding Laravel development. If you are interested in becoming a sponsor, please visit the [Laravel Partners program](https://partners.laravel.com).
-
-### Premium Partners
-
-- **[Vehikl](https://vehikl.com)**
-- **[Tighten Co.](https://tighten.co)**
-- **[Kirschbaum Development Group](https://kirschbaumdevelopment.com)**
-- **[64 Robots](https://64robots.com)**
-- **[Curotec](https://www.curotec.com/services/technologies/laravel)**
-- **[DevSquad](https://devsquad.com/hire-laravel-developers)**
-- **[Redberry](https://redberry.international/laravel-development)**
-- **[Active Logic](https://activelogic.com)**
-
-## Contributing
-
-Thank you for considering contributing to the Laravel framework! The contribution guide can be found in the [Laravel documentation](https://laravel.com/docs/contributions).
-
-## Code of Conduct
-
-In order to ensure that the Laravel community is welcoming to all, please review and abide by the [Code of Conduct](https://laravel.com/docs/contributions#code-of-conduct).
-
-## Security Vulnerabilities
-
-If you discover a security vulnerability within Laravel, please send an e-mail to Taylor Otwell via [taylor@laravel.com](mailto:taylor@laravel.com). All security vulnerabilities will be promptly addressed.
-
-## License
-
-The Laravel framework is open-sourced software licensed under the [MIT license](https://opensource.org/licenses/MIT).
+- Private keys must **never** live on the Laravel server; use the operator pattern or another secure signer for on‑chain writes.
+- This app is designed to be blockchain‑ready: if the operator flow is running and updating `blockchain_tx`, certificates are provably anchored on‑chain.
+- For more design details, see any additional docs under `docs/` if present.
